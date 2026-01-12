@@ -749,7 +749,22 @@ function buildParamString_(params) {
 
 function computeOAuthSignature_(baseString, consumerSecret, tokenSecret) {
   const key = `${oauthEncode_(consumerSecret)}&${oauthEncode_(tokenSecret)}`;
-  const signatureBytes = Utilities.computeHmacSha1Signature(baseString, key);
+  let signatureBytes;
+  if (typeof Utilities.computeHmacSha1Signature === 'function') {
+    signatureBytes = Utilities.computeHmacSha1Signature(baseString, key);
+  } else if (
+    typeof Utilities.computeHmacSignature === 'function' &&
+    Utilities.MacAlgorithm &&
+    Utilities.MacAlgorithm.HMAC_SHA_1
+  ) {
+    signatureBytes = Utilities.computeHmacSignature(
+      Utilities.MacAlgorithm.HMAC_SHA_1,
+      baseString,
+      key
+    );
+  } else {
+    throw new Error('HMAC-SHA1 is not available in this Apps Script runtime');
+  }
   return Utilities.base64Encode(signatureBytes);
 }
 

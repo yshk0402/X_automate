@@ -737,10 +737,28 @@
       padding: 2px 0;
     }
 
+    .fc .fc-daygrid-event {
+      width: 100%;
+      max-width: 100%;
+      white-space: normal;
+    }
+
+    .fc .fc-daygrid-event .fc-event-main {
+      width: 100%;
+    }
+
+    .fc .fc-daygrid-day-frame {
+      overflow: hidden;
+    }
+
     .event-card {
       display: grid;
       gap: 4px;
       padding: 6px 8px;
+      width: 100%;
+      max-width: 100%;
+      box-sizing: border-box;
+      overflow: hidden;
       border-radius: 12px;
       background: #fff;
       border-left: 4px solid var(--event-color, var(--accent));

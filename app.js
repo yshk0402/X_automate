@@ -4,6 +4,8 @@ const CONFIG = {
   listSnippetLength: 80,
   eventSnippetLength: 32,
   timeStepMinutes: 5,
+  mediaMaxFiles: 4,
+  mediaMaxBytes: 5 * 1024 * 1024,
   activityStart: { year: 2026, month: 0, day: 1 },
   activityEnd: { year: 2027, month: 0, day: 1 },
 };
@@ -26,6 +28,8 @@ const state = {
   view: 'dayGridMonth',
   filters: { status: 'all', query: '' },
   editingId: null,
+  mediaDraft: { existingIds: [], clearExisting: false },
+  mediaEditable: false,
   connection: { online: false },
 };
 
@@ -72,6 +76,10 @@ function bindElements() {
   elements.datetimeInput = document.getElementById('post-datetime');
   elements.textInput = document.getElementById('post-text');
   elements.textCount = document.getElementById('text-count');
+  elements.mediaInput = document.getElementById('post-media');
+  elements.mediaList = document.getElementById('media-list');
+  elements.mediaHelp = document.getElementById('media-help');
+  elements.clearMediaBtn = document.getElementById('clear-media-btn');
   elements.statusLine = document.getElementById('status-line');
   elements.errorLine = document.getElementById('error-line');
   elements.modalActions = document.getElementById('modal-actions');
@@ -128,6 +136,14 @@ function initControls() {
 
   elements.textInput.addEventListener('input', () => {
     updateTextCount();
+  });
+
+  elements.mediaInput.addEventListener('change', () => {
+    handleMediaSelection();
+  });
+
+  elements.clearMediaBtn.addEventListener('click', () => {
+    clearMediaSelection();
   });
 
   elements.postList.addEventListener('click', (event) => {
@@ -191,8 +207,10 @@ function initCalendar() {
       if (!post) return;
       const time = formatTime(toDate(post.scheduled_at));
       const snippet = truncate(post.text, CONFIG.eventSnippetLength);
+      const mediaCount = post.media_file_ids ? post.media_file_ids.length : 0;
+      const mediaBadge = mediaCount ? `<div class="event-media">Images: ${mediaCount}</div>` : '';
       return {
-        html: `<div class="event-card"><div class="event-time">${escapeHtml(time)}</div><div class="event-text">${escapeHtml(snippet)}</div></div>`,
+        html: `<div class="event-card"><div class="event-time">${escapeHtml(time)}</div><div class="event-text">${escapeHtml(snippet)}</div>${mediaBadge}</div>`,
       };
     },
     eventDidMount: (info) => {
@@ -329,6 +347,8 @@ function renderDayPanel() {
     item.dataset.id = post.id;
     const status = STATUS[post.status] ? STATUS[post.status].label : post.status;
     const time = formatTime(toDate(post.scheduled_at));
+    const mediaCount = post.media_file_ids ? post.media_file_ids.length : 0;
+    const mediaLine = mediaCount ? `<div class="post-media">Images: ${mediaCount}</div>` : '';
     item.innerHTML = `
       <div class="post-meta">
         <span class="status-dot" style="background:${STATUS[post.status]?.color || '#999'}"></span>
@@ -336,6 +356,7 @@ function renderDayPanel() {
         <span>${escapeHtml(status)}</span>
       </div>
       <div class="post-text">${escapeHtml(truncate(post.text, CONFIG.listSnippetLength))}</div>
+      ${mediaLine}
       <div class="post-actions">
         <button class="button small secondary" data-action="open">Open</button>
         ${post.status === 'queued' ? '<button class="button small" data-action="edit">Edit</button>' : ''}
@@ -442,19 +463,31 @@ function openModal({ mode, post, scheduledAt, text }) {
 
   state.editingId = post ? post.id : null;
   const status = post ? post.status : 'queued';
+  const editable = isCreate || (isEdit && status === 'queued');
 
   elements.modalTitle.textContent = isCreate ? 'New Post' : isEdit ? 'Edit Post' : 'Post Details';
   const dateValue = isCreate ? scheduledAt : post ? toDate(post.scheduled_at) : new Date();
   const textValue = isCreate ? text : post ? post.text : '';
+  const mediaIds = post ? normalizeMediaIds(post.media_file_ids) : [];
+  state.mediaDraft = { existingIds: mediaIds.slice(), clearExisting: false };
+  state.mediaEditable = editable;
 
   elements.datetimeInput.value = toLocalInputValue(dateValue);
   elements.textInput.value = textValue;
   updateTextCount();
 
+  if (elements.mediaInput) {
+    elements.mediaInput.value = '';
+    elements.mediaInput.disabled = !editable;
+  }
+  if (elements.clearMediaBtn) {
+    elements.clearMediaBtn.disabled = !editable;
+  }
+  renderMediaSummary();
+
   elements.statusLine.textContent = post ? `Status: ${STATUS[status]?.label || status}` : '';
   elements.errorLine.textContent = post && post.error ? `Error: ${post.error}` : '';
 
-  const editable = isCreate || (isEdit && status === 'queued');
   elements.datetimeInput.disabled = !editable;
   elements.textInput.disabled = !editable;
 
@@ -497,6 +530,14 @@ function closeModal() {
   elements.modal.classList.remove('active');
   elements.modal.setAttribute('aria-hidden', 'true');
   elements.modalActions.innerHTML = '';
+  if (elements.mediaInput) {
+    elements.mediaInput.value = '';
+  }
+  if (elements.mediaList) {
+    elements.mediaList.innerHTML = '';
+  }
+  state.mediaDraft = { existingIds: [], clearExisting: false };
+  state.mediaEditable = false;
 }
 
 function savePost(isCreate) {
@@ -536,11 +577,167 @@ function savePost(isCreate) {
   };
 
   if (isCreate) {
-    runAction(() => gasCall('createPost', payload), 'Created');
+    runAction(() => savePostWithMedia(payload, true), 'Created');
   } else {
-    runAction(() => gasCall('updatePost', state.editingId, payload), 'Saved');
+    runAction(() => savePostWithMedia(payload, false), 'Saved');
   }
 }
+
+async function savePostWithMedia(payload, isCreate) {
+  const mediaIds = await buildMediaIdsForSave();
+  payload.media_file_ids = mediaIds;
+  if (isCreate) {
+    return gasCall('createPost', payload);
+  }
+  return gasCall('updatePost', state.editingId, payload);
+}
+
+function handleMediaSelection() {
+  const files = Array.from(elements.mediaInput.files || []);
+  if (!validateMediaFiles(files)) {
+    elements.mediaInput.value = '';
+  }
+  renderMediaSummary();
+}
+
+function clearMediaSelection() {
+  if (elements.mediaInput) {
+    elements.mediaInput.value = '';
+  }
+  if (state.mediaDraft) {
+    state.mediaDraft.clearExisting = true;
+  }
+  renderMediaSummary();
+}
+
+function renderMediaSummary() {
+  if (!elements.mediaList) return;
+  const existing = state.mediaDraft && !state.mediaDraft.clearExisting ? state.mediaDraft.existingIds : [];
+  const files = Array.from(elements.mediaInput.files || []);
+  const items = [];
+
+  if (existing.length) {
+    items.push(`<div class="media-item"><span>Existing images</span><span class="media-pill">${existing.length}</span></div>`);
+  }
+
+  if (files.length) {
+    items.push(`<div class="media-item"><span>New images</span><span class="media-pill">${files.length}</span></div>`);
+    const names = files.map((file) => escapeHtml(file.name)).join(', ');
+    if (names) {
+      items.push(`<div class="media-names">${names}</div>`);
+    }
+  }
+
+  if (!items.length) {
+    items.push('<div class="media-item"><span>No images attached</span></div>');
+  }
+
+  elements.mediaList.innerHTML = items.join('');
+
+  if (elements.clearMediaBtn) {
+    const shouldShow = state.mediaEditable && (existing.length || files.length);
+    elements.clearMediaBtn.style.display = shouldShow ? 'inline-flex' : 'none';
+  }
+}
+
+function validateMediaFiles(files) {
+  if (!files.length) return true;
+  if (files.length > CONFIG.mediaMaxFiles) {
+    showToast(`Up to ${CONFIG.mediaMaxFiles} images are allowed`, 'error');
+    return false;
+  }
+
+  const existingCount = state.mediaDraft && !state.mediaDraft.clearExisting ? state.mediaDraft.existingIds.length : 0;
+  if (files.length + existingCount > CONFIG.mediaMaxFiles) {
+    showToast(`Total images must be ${CONFIG.mediaMaxFiles} or less`, 'error');
+    return false;
+  }
+
+  for (const file of files) {
+    if (!file.type || !file.type.startsWith('image/')) {
+      showToast('Only image files are allowed', 'error');
+      return false;
+    }
+    if (file.size > CONFIG.mediaMaxBytes) {
+      showToast('Image is too large', 'error');
+      return false;
+    }
+  }
+
+  return true;
+}
+
+async function buildMediaIdsForSave() {
+  const existing = state.mediaDraft && !state.mediaDraft.clearExisting ? state.mediaDraft.existingIds : [];
+  const files = Array.from(elements.mediaInput.files || []);
+  if (!files.length) return existing;
+
+  if (!validateMediaFiles(files)) {
+    throw new Error('Invalid image selection');
+  }
+
+  const payloadFiles = await readFilesAsPayload(files);
+  const uploaded = await gasCall('uploadMediaFiles', payloadFiles);
+  const newIds = (uploaded || []).map((item) => item.id).filter(Boolean);
+  if (newIds.length !== payloadFiles.length) {
+    throw new Error('Failed to upload images');
+  }
+  return existing.concat(newIds);
+}
+
+function readFilesAsPayload(files) {
+  return Promise.all(
+    files.map((file) => {
+      return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const result = typeof reader.result === 'string' ? reader.result : '';
+          const base64 = result.split(',')[1] || '';
+          resolve({
+            name: file.name,
+            mimeType: file.type || 'application/octet-stream',
+            data: base64,
+          });
+        };
+        reader.onerror = () => {
+          reject(new Error('Failed to read image'));
+        };
+        reader.readAsDataURL(file);
+      });
+    })
+  );
+}
+
+function normalizeMediaIds(value) {
+  if (!value) return [];
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => String(item || '').trim())
+      .filter((item) => item);
+  }
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) return [];
+    if (trimmed.startsWith('[')) {
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (Array.isArray(parsed)) {
+          return parsed
+            .map((item) => String(item || '').trim())
+            .filter((item) => item);
+        }
+      } catch (error) {
+        // fall through
+      }
+    }
+    return trimmed
+      .split(',')
+      .map((item) => item.trim())
+      .filter((item) => item);
+  }
+  return [];
+}
+
 
 function handleEventDrop(info) {
   const post = state.postsById.get(info.event.id);
@@ -741,6 +938,7 @@ function normalizePost(post) {
     scheduled_at: post.scheduled_at,
     posted_at: post.posted_at || '',
     text: post.text || '',
+    media_file_ids: normalizeMediaIds(post.media_file_ids),
     status: post.status || 'queued',
     error: post.error || '',
   };
@@ -895,11 +1093,12 @@ function initMock() {
   ];
 }
 
-function createMockPost(id, date, text, status, error) {
+function createMockPost(id, date, text, status, error, mediaFileIds) {
   return {
     id,
     scheduled_at: toJstIso(date),
     text,
+    media_file_ids: mediaFileIds || [],
     status,
     error: error || '',
   };
@@ -924,17 +1123,27 @@ const mockHandlers = {
       id,
       scheduled_at: payload.scheduled_at,
       text: payload.text,
+      media_file_ids: payload.media_file_ids || [],
       status: 'queued',
       error: '',
     };
     mockStore.posts.push(post);
     return post;
   },
+  uploadMediaFiles(files) {
+    const base = Math.random().toString(36).slice(2, 8);
+    return (files || []).map((file, index) => ({
+      id: `mock-media-${base}-${index + 1}`,
+      name: file.name || `image-${index + 1}`,
+      mimeType: file.mimeType || 'image/jpeg',
+    }));
+  },
   updatePost(id, payload) {
     const post = mockStore.posts.find((item) => item.id === id);
     if (!post) return null;
     post.scheduled_at = payload.scheduled_at;
     post.text = payload.text;
+    post.media_file_ids = payload.media_file_ids || [];
     return post;
   },
   movePost(id, newScheduledAt) {
@@ -964,3 +1173,7 @@ const mockHandlers = {
     return post;
   },
 };
+if (typeof window !== 'undefined') {
+  window.__APP_LOADED__ = true;
+}
+

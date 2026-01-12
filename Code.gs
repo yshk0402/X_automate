@@ -4,12 +4,17 @@ const CONFIG = {
   MAX_TEXT_LENGTH: null,
   NOTIFY_THROTTLE_MINUTES: 30,
   X_API_BASE_URL: 'https://api.x.com',
+  X_UPLOAD_BASE_URL: 'https://upload.twitter.com',
+  MEDIA_FOLDER_NAME: 'X Scheduler Media',
+  MEDIA_MAX_FILES: 4,
+  MEDIA_MAX_BYTES: 5 * 1024 * 1024,
 };
 
 const POSTS_HEADERS = [
   'id',
   'scheduled_at',
   'text',
+  'media_file_ids',
   'status',
   'created_at',
   'updated_at',
@@ -64,6 +69,7 @@ function createPost(payload) {
     id: Utilities.getUuid(),
     scheduled_at: formatJstIso_(data.scheduled_at),
     text: data.text,
+    media_file_ids: stringifyMediaIds_(data.media_file_ids),
     status: POST_STATUS.queued,
     created_at: nowIso,
     updated_at: nowIso,
@@ -95,6 +101,7 @@ function updatePost(id, payload) {
   const updates = {
     scheduled_at: formatJstIso_(data.scheduled_at),
     text: data.text,
+    media_file_ids: stringifyMediaIds_(data.media_file_ids),
     updated_at: formatJstIso_(new Date()),
   };
 
@@ -220,6 +227,56 @@ function setXCredentials(consumerKey, consumerSecret, accessToken, accessTokenSe
   if (accessTokenSecret) props.setProperty('X_ACCESS_TOKEN_SECRET', accessTokenSecret);
 }
 
+function uploadMediaFiles(files) {
+  if (!files || !Array.isArray(files) || !files.length) return [];
+  if (files.length > CONFIG.MEDIA_MAX_FILES) {
+    throw new Error('Too many images (max 4).');
+  }
+
+  const folder = getMediaFolder_();
+  return files.map((file) => {
+    const name = String(file.name || 'image');
+    const mimeType = String(file.mimeType || 'application/octet-stream');
+    const data = String(file.data || '');
+
+    if (!mimeType.startsWith('image/')) {
+      throw new Error('Only image files are allowed');
+    }
+    if (!data) {
+      throw new Error('Image data is missing');
+    }
+
+    const bytes = Utilities.base64Decode(data);
+    if (bytes.length > CONFIG.MEDIA_MAX_BYTES) {
+      throw new Error('Image is too large');
+    }
+
+    const blob = Utilities.newBlob(bytes, mimeType, name);
+    const created = folder.createFile(blob);
+    return {
+      id: created.getId(),
+      name: created.getName(),
+      mimeType: created.getMimeType(),
+    };
+  });
+}
+
+function getMediaFolder_() {
+  const props = PropertiesService.getScriptProperties();
+  const existingId = props.getProperty('MEDIA_FOLDER_ID');
+  if (existingId) {
+    try {
+      return DriveApp.getFolderById(existingId);
+    } catch (error) {
+      // Fall through to create a new folder.
+    }
+  }
+  const folder = DriveApp.createFolder(CONFIG.MEDIA_FOLDER_NAME);
+  props.setProperty('MEDIA_FOLDER_ID', folder.getId());
+  return folder;
+}
+
+
 function processQueue_() {
   const sheet = ensurePostsSheet_();
   const headerMap = getHeaderMap_(sheet);
@@ -240,7 +297,8 @@ function processQueue_() {
   const postingPost = rowToPost_(postingRow, headerMap);
 
   try {
-    const tweetId = postToX_(postingPost.text);
+    const mediaIds = normalizeMediaIds_(postingPost.media_file_ids);
+    const tweetId = postToX_(postingPost.text, mediaIds);
     const successUpdates = {
       status: POST_STATUS.posted,
       tweet_id: tweetId,
@@ -299,7 +357,12 @@ function getHeaderMap_(sheet) {
 
   const missing = POSTS_HEADERS.filter((name) => indexByName[name] === undefined);
   if (missing.length) {
-    throw new Error(`Posts sheet header mismatch. Missing: ${missing.join(', ')}`);
+    missing.forEach((name) => {
+      indexByName[name] = headerRow.length;
+      headerRow.push(name);
+    });
+    sheet.getRange(1, 1, 1, headerRow.length).setValues([headerRow]);
+    lastColumn = headerRow.length;
   }
 
   return { headerRow, indexByName, count: lastColumn };
@@ -388,6 +451,7 @@ function normalizePost_(post) {
     scheduled_at: post.scheduled_at || '',
     posted_at: post.posted_at || '',
     text: post.text || '',
+    media_file_ids: normalizeMediaIds_(post.media_file_ids),
     status: post.status || POST_STATUS.queued,
     error: post.error || '',
     tweet_id: post.tweet_id || '',
@@ -417,6 +481,7 @@ function normalizePayload_(payload) {
 
   const text = String(payload.text || '').trim();
   const scheduledAt = parseDateValue_(payload.scheduled_at);
+  const mediaIds = normalizeMediaIds_(payload.media_file_ids);
 
   if (!scheduledAt) throw new Error('Invalid scheduled time');
   if (isPast_(scheduledAt)) throw new Error('Past time is not allowed');
@@ -425,9 +490,49 @@ function normalizePayload_(payload) {
   if (typeof limit === 'number' && isFinite(limit) && text.length > limit) {
     throw new Error('Text is too long');
   }
+  if (mediaIds.length > CONFIG.MEDIA_MAX_FILES) {
+    throw new Error('Too many images (max 4).');
+  }
 
-  return { scheduled_at: scheduledAt, text };
+  return { scheduled_at: scheduledAt, text, media_file_ids: mediaIds };
 }
+
+function normalizeMediaIds_(value) {
+  if (!value) return [];
+  if (Array.isArray(value)) {
+    return value
+      .map((item) => String(item || '').trim())
+      .filter((item) => item);
+  }
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) return [];
+    if (trimmed[0] === '[') {
+      try {
+        const parsed = JSON.parse(trimmed);
+        if (Array.isArray(parsed)) {
+          return parsed
+            .map((item) => String(item || '').trim())
+            .filter((item) => item);
+        }
+      } catch (error) {
+        // fall through to comma split
+      }
+    }
+    return trimmed
+      .split(',')
+      .map((item) => item.trim())
+      .filter((item) => item);
+  }
+  return [];
+}
+
+function stringifyMediaIds_(value) {
+  const ids = normalizeMediaIds_(value);
+  if (!ids.length) return '';
+  return ids.join(',');
+}
+
 
 function isPast_(date) {
   return date.getTime() < Date.now() - 60 * 1000;
@@ -491,7 +596,7 @@ function clearFailureNotice_(postId) {
   props.deleteProperty(`FAILED_NOTICE_${postId}`);
 }
 
-function postToX_(text) {
+function postToX_(text, mediaFileIds) {
   const content = String(text || '').trim();
   if (!content) throw new Error('Text is required');
   const limit = CONFIG.MAX_TEXT_LENGTH;
@@ -500,10 +605,15 @@ function postToX_(text) {
   }
 
   const credentials = getXCredentials_();
+  const mediaIds = uploadMediaToX_(mediaFileIds, credentials);
   const url = `${CONFIG.X_API_BASE_URL}/2/tweets`;
   const method = 'post';
   const oauthHeader = buildOAuthHeader_(method, url, credentials);
-  const payload = JSON.stringify({ text: content });
+  const body = { text: content };
+  if (mediaIds.length) {
+    body.media = { media_ids: mediaIds };
+  }
+  const payload = JSON.stringify(body);
 
   const response = UrlFetchApp.fetch(url, {
     method,
@@ -517,16 +627,74 @@ function postToX_(text) {
   });
 
   const status = response.getResponseCode();
-  const body = response.getContentText();
+  const bodyText = response.getContentText();
   if (status !== 200 && status !== 201) {
-    throw new Error(extractXErrorMessage_(status, body));
+    throw new Error(extractXErrorMessage_(status, bodyText));
   }
 
-  const data = JSON.parse(body);
+  const data = JSON.parse(bodyText);
   const tweetId = data && data.data ? data.data.id : '';
   if (!tweetId) throw new Error('X API response missing tweet id');
   return tweetId;
 }
+
+function uploadMediaToX_(fileIds, credentials) {
+  const ids = normalizeMediaIds_(fileIds);
+  if (!ids.length) return [];
+  if (ids.length > CONFIG.MEDIA_MAX_FILES) {
+    throw new Error('Too many images (max 4).');
+  }
+
+  const url = `${CONFIG.X_UPLOAD_BASE_URL}/1.1/media/upload.json`;
+  const method = 'post';
+  const results = [];
+
+  ids.forEach((fileId) => {
+    let file;
+    try {
+      file = DriveApp.getFileById(fileId);
+    } catch (error) {
+      throw new Error('Media file not found in Drive');
+    }
+
+    const size = file.getSize();
+    if (size > CONFIG.MEDIA_MAX_BYTES) {
+      throw new Error('Image is too large');
+    }
+    const mimeType = file.getMimeType();
+    if (mimeType && !mimeType.startsWith('image/')) {
+      throw new Error('Only image files are allowed');
+    }
+
+    const blob = file.getBlob();
+    const oauthHeader = buildOAuthHeader_(method, url, credentials);
+    const response = UrlFetchApp.fetch(url, {
+      method,
+      payload: {
+        media: blob,
+        media_category: 'tweet_image',
+      },
+      headers: {
+        Authorization: oauthHeader,
+      },
+      muteHttpExceptions: true,
+    });
+
+    const status = response.getResponseCode();
+    const bodyText = response.getContentText();
+    if (status !== 200 && status !== 201) {
+      throw new Error(extractXErrorMessage_(status, bodyText));
+    }
+
+    const data = JSON.parse(bodyText);
+    const mediaId = data && (data.media_id_string || data.media_id);
+    if (!mediaId) throw new Error('X media upload response missing media id');
+    results.push(String(mediaId));
+  });
+
+  return results;
+}
+
 
 function getXCredentials_() {
   const props = PropertiesService.getScriptProperties();

@@ -1,0 +1,880 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>X Scheduler</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,600;9..144,700&family=Zen+Kaku+Gothic+New:wght@400;500;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/fullcalendar@6.1.11/index.global.min.css" onerror="this.onerror=null;this.href='https://unpkg.com/fullcalendar@6.1.11/index.global.min.css';">
+  <style>
+    :root {
+      --bg: #f4f0e7;
+      --bg-accent: #e7efe7;
+      --surface: #fffaf2;
+      --surface-strong: #fff3df;
+      --ink: #171612;
+      --muted: #57554d;
+      --accent: #1b9aaa;
+      --accent-2: #f26a4b;
+      --accent-3: #f2c14e;
+      --queued: #1b9aaa;
+      --posting: #f2c14e;
+      --posted: #2f8f4e;
+      --failed: #c94f4f;
+      --canceled: #8a8a8a;
+      --heat-0: #fff4e6;
+      --heat-1: #ffd9b0;
+      --heat-2: #ffb86b;
+      --heat-3: #f28b2b;
+      --heat-4: #d46914;
+      --shadow: 0 18px 45px rgba(32, 28, 20, 0.16);
+      --font-sans: "Zen Kaku Gothic New", "Hiragino Sans", "Yu Gothic", "Meiryo", sans-serif;
+      --font-serif: "Fraunces", "Georgia", serif;
+      color-scheme: light;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      font-family: var(--font-sans);
+      color: var(--ink);
+      background: var(--bg);
+      position: relative;
+      overflow-x: hidden;
+    }
+
+    body::before {
+      content: "";
+      position: fixed;
+      inset: 0;
+      background-image:
+        radial-gradient(circle at 10% 15%, rgba(27, 154, 170, 0.12), transparent 42%),
+        radial-gradient(circle at 90% 10%, rgba(242, 106, 75, 0.15), transparent 38%),
+        radial-gradient(circle at 50% 100%, rgba(242, 193, 78, 0.14), transparent 40%),
+        linear-gradient(120deg, rgba(255, 255, 255, 0.7), rgba(244, 240, 231, 0.85));
+      z-index: -2;
+    }
+
+    body::after {
+      content: "";
+      position: fixed;
+      inset: 0;
+      background-image: radial-gradient(rgba(23, 22, 18, 0.06) 1px, transparent 1px);
+      background-size: 26px 26px;
+      opacity: 0.35;
+      z-index: -1;
+      pointer-events: none;
+    }
+
+    .app {
+      width: min(1560px, 96vw);
+      margin: 0 auto;
+      padding: 28px 32px 46px;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+      animation: rise 0.6s ease both;
+    }
+
+    @keyframes rise {
+      from {
+        opacity: 0;
+        transform: translateY(18px);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+
+    header.topbar {
+      display: grid;
+      grid-template-columns: minmax(0, 1.4fr) auto;
+      gap: 16px;
+      align-items: center;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 16px;
+    }
+
+    .logo {
+      display: grid;
+      place-items: center;
+      width: 52px;
+      height: 52px;
+      border-radius: 18px;
+      background: var(--surface);
+      box-shadow: var(--shadow);
+      font-family: var(--font-sans);
+      font-size: 28px;
+      color: var(--accent-2);
+    }
+
+    .brand h1 {
+      margin: 0;
+      font-family: var(--font-sans);
+      font-size: 28px;
+      letter-spacing: 0.4px;
+    }
+
+    .brand p {
+      margin: 4px 0 0;
+      color: var(--muted);
+      font-size: 14px;
+    }
+
+    .topbar-actions {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      justify-content: flex-end;
+      flex-wrap: wrap;
+    }
+
+    .chip {
+      padding: 8px 14px;
+      border-radius: 999px;
+      background: rgba(27, 154, 170, 0.1);
+      color: var(--accent);
+      font-weight: 600;
+      font-size: 13px;
+      letter-spacing: 0.3px;
+    }
+
+    .chip[data-state="offline"] {
+      background: rgba(201, 79, 79, 0.12);
+      color: var(--failed);
+    }
+
+    .controls {
+      display: grid;
+      grid-template-columns: minmax(0, 2.1fr) minmax(0, 1fr);
+      gap: 16px;
+      align-items: stretch;
+    }
+
+    .controls section {
+      background: var(--surface);
+      border-radius: 18px;
+      padding: 16px;
+      box-shadow: var(--shadow);
+      display: grid;
+      gap: 12px;
+      height: 100%;
+    }
+
+    .control-row {
+      display: grid;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .control-row.legend-row {
+      grid-template-columns: 1fr;
+    }
+
+    .control-inline {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 12px;
+      align-items: center;
+    }
+
+    .calendar-nav {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr) auto;
+      gap: 10px;
+      align-items: center;
+    }
+
+    .calendar-title {
+      text-align: center;
+      font-family: var(--font-serif);
+      font-size: 18px;
+      letter-spacing: 0.6px;
+      color: var(--ink);
+      background: var(--surface-strong);
+      border: 1px solid rgba(23, 22, 18, 0.12);
+      border-radius: 999px;
+      padding: 6px 12px;
+    }
+
+    label {
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+      color: var(--muted);
+      font-weight: 600;
+      white-space: nowrap;
+    }
+
+    select,
+    input[type="search"],
+    input[type="datetime-local"],
+    textarea {
+      border: 1px solid rgba(23, 22, 18, 0.2);
+      border-radius: 12px;
+      padding: 10px 12px;
+      font-family: var(--font-sans);
+      font-size: 14px;
+      background: #fff;
+      color: var(--ink);
+      width: 100%;
+      min-width: 0;
+    }
+
+    input[type="search"] {
+      min-width: 0;
+    }
+
+    textarea {
+      min-height: 140px;
+      resize: vertical;
+    }
+
+    .button {
+      border: none;
+      border-radius: 999px;
+      padding: 10px 18px;
+      font-weight: 600;
+      font-size: 14px;
+      cursor: pointer;
+      background: var(--ink);
+      color: #fff;
+      transition: transform 0.2s ease, box-shadow 0.2s ease;
+    }
+
+    .button.secondary {
+      background: #fff;
+      color: var(--ink);
+      border: 1px solid rgba(23, 22, 18, 0.2);
+    }
+
+    .button.ghost {
+      background: transparent;
+      color: var(--ink);
+      border: 1px dashed rgba(23, 22, 18, 0.25);
+    }
+
+    .button:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 12px 22px rgba(23, 22, 18, 0.12);
+    }
+
+    .button.small {
+      padding: 6px 12px;
+      font-size: 12px;
+      border-radius: 12px;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: minmax(0, 2.1fr) minmax(0, 1fr);
+      gap: 20px;
+    }
+
+    .card {
+      background: var(--surface);
+      border-radius: 22px;
+      padding: 16px;
+      box-shadow: var(--shadow);
+    }
+
+    #calendar {
+      min-height: clamp(640px, 72vh, 880px);
+    }
+
+    .side-panel {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+
+    .panel-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .panel-header h2 {
+      margin: 0;
+      font-family: var(--font-sans);
+      font-size: 20px;
+    }
+
+    .activity-total {
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: rgba(242, 106, 75, 0.12);
+      color: #c25a16;
+      font-size: 12px;
+      font-weight: 600;
+      letter-spacing: 0.3px;
+      white-space: nowrap;
+    }
+
+    .activity-heatmap {
+      --heat-cell-size: 12px;
+      --activity-weeks: 0;
+      --month-label-height: 16px;
+      --month-gap: 6px;
+      display: grid;
+      grid-template-columns: auto 1fr;
+      grid-template-rows: auto 1fr;
+      gap: 6px 8px;
+      align-items: start;
+    }
+
+    .activity-scroll {
+      grid-column: 2;
+      grid-row: 1 / span 2;
+      display: grid;
+      grid-template-rows: auto 1fr;
+      gap: var(--month-gap);
+      overflow-x: auto;
+      padding-bottom: 4px;
+    }
+
+    .activity-months {
+      display: grid;
+      grid-template-columns: repeat(var(--activity-weeks), var(--heat-cell-size));
+      gap: 4px;
+      min-height: var(--month-label-height);
+      align-items: end;
+    }
+
+    .activity-month {
+      font-size: 11px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+      line-height: var(--month-label-height);
+      white-space: nowrap;
+    }
+
+    .activity-weekdays {
+      grid-column: 1;
+      grid-row: 2;
+      display: grid;
+      grid-template-rows: repeat(7, var(--heat-cell-size));
+      gap: 4px;
+      padding-right: 6px;
+    }
+
+    .activity-weekday {
+      font-size: 11px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+      height: var(--heat-cell-size);
+      display: flex;
+      align-items: center;
+      justify-content: flex-end;
+    }
+
+    .activity-grid {
+      display: grid;
+      grid-template-columns: repeat(var(--activity-weeks), var(--heat-cell-size));
+      grid-template-rows: repeat(7, var(--heat-cell-size));
+      gap: 4px;
+    }
+
+    .activity-cell {
+      width: var(--heat-cell-size);
+      height: var(--heat-cell-size);
+      border-radius: 4px;
+      border: 1px solid rgba(23, 22, 18, 0.08);
+      background: var(--heat-0);
+    }
+
+    .activity-cell[data-level="1"] {
+      background: var(--heat-1);
+    }
+
+    .activity-cell[data-level="2"] {
+      background: var(--heat-2);
+    }
+
+    .activity-cell[data-level="3"] {
+      background: var(--heat-3);
+    }
+
+    .activity-cell[data-level="4"] {
+      background: var(--heat-4);
+    }
+
+    .activity-cell.is-today {
+      box-shadow: 0 0 0 2px rgba(242, 106, 75, 0.35);
+    }
+
+    .activity-cell.is-outside {
+      opacity: 0.35;
+    }
+
+    .activity-legend {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      color: var(--muted);
+      font-size: 11px;
+    }
+
+    .activity-swatch {
+      width: 12px;
+      height: 12px;
+      border-radius: 4px;
+      border: 1px solid rgba(23, 22, 18, 0.08);
+      background: var(--heat-0);
+    }
+
+    .activity-swatch[data-level="1"] {
+      background: var(--heat-1);
+    }
+
+    .activity-swatch[data-level="2"] {
+      background: var(--heat-2);
+    }
+
+    .activity-swatch[data-level="3"] {
+      background: var(--heat-3);
+    }
+
+    .activity-swatch[data-level="4"] {
+      background: var(--heat-4);
+    }
+
+    .post-list {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+      display: grid;
+      gap: 12px;
+      overflow-y: auto;
+    }
+
+    .post-item {
+      background: #fff;
+      border-radius: 16px;
+      padding: 12px 14px;
+      display: grid;
+      gap: 8px;
+      border: 1px solid rgba(23, 22, 18, 0.12);
+      animation: fadeIn 0.4s ease both;
+      animation-delay: calc(var(--i, 0) * 60ms);
+    }
+
+    @keyframes fadeIn {
+      from {
+        opacity: 0;
+        transform: translateY(8px);
+      }
+      to {
+        opacity: 1;
+        transform: translateY(0);
+      }
+    }
+
+    .post-meta {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 12px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.6px;
+    }
+
+    .status-dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--muted);
+    }
+
+    .post-text {
+      font-size: 14px;
+      line-height: 1.5;
+    }
+
+    .post-actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+
+    .legend {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+
+    .legend-item {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .legend-item span {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      display: inline-block;
+    }
+
+    .empty {
+      padding: 24px;
+      border-radius: 16px;
+      border: 1px dashed rgba(23, 22, 18, 0.25);
+      text-align: center;
+      color: var(--muted);
+    }
+
+    .modal {
+      position: fixed;
+      inset: 0;
+      background: rgba(23, 22, 18, 0.45);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.2s ease;
+      padding: 24px;
+      z-index: 10;
+    }
+
+    .modal.active {
+      opacity: 1;
+      pointer-events: auto;
+    }
+
+    .modal-card {
+      background: var(--surface);
+      border-radius: 20px;
+      padding: 20px;
+      width: min(520px, 92vw);
+      box-shadow: var(--shadow);
+      display: grid;
+      gap: 12px;
+    }
+
+    .modal-card h3 {
+      margin: 0;
+      font-family: var(--font-sans);
+      font-size: 22px;
+    }
+
+    .modal-row {
+      display: grid;
+      gap: 8px;
+    }
+
+    .modal-actions {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
+    .help {
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .toast {
+      position: fixed;
+      bottom: 24px;
+      right: 24px;
+      background: #fff;
+      border-radius: 16px;
+      padding: 12px 16px;
+      border: 1px solid rgba(23, 22, 18, 0.12);
+      box-shadow: var(--shadow);
+      opacity: 0;
+      transform: translateY(12px);
+      transition: all 0.2s ease;
+      z-index: 12;
+    }
+
+    .toast.show {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    .toast[data-tone="error"] {
+      border-color: rgba(201, 79, 79, 0.4);
+      color: var(--failed);
+    }
+
+    .fc {
+      font-family: var(--font-sans);
+    }
+
+    .fc .fc-daygrid-day-number {
+      color: var(--muted);
+      font-weight: 600;
+    }
+
+    .fc .fc-day-today {
+      background: rgba(242, 193, 78, 0.18);
+    }
+
+    .fc .fc-popover {
+      background: var(--surface);
+      border: 1px solid rgba(23, 22, 18, 0.18);
+      box-shadow: var(--shadow);
+    }
+
+    .fc .fc-popover-header {
+      background: var(--surface-strong);
+      border-bottom: 1px solid rgba(23, 22, 18, 0.12);
+      color: var(--ink);
+      font-weight: 600;
+    }
+
+    .fc .fc-popover-body {
+      background: var(--surface);
+    }
+
+    .fc .fc-popover .fc-event,
+    .fc .fc-popover .fc-event .fc-event-title,
+    .fc .fc-popover .fc-event .fc-event-time {
+      color: var(--ink);
+    }
+
+    .fc .fc-popover .fc-event {
+      background: var(--surface-strong);
+      border: 1px solid rgba(23, 22, 18, 0.12);
+      border-left: 4px solid var(--event-color, var(--accent));
+      border-radius: 10px;
+      padding: 4px 6px;
+    }
+
+    .fc .fc-popover .fc-event .event-card {
+      background: transparent;
+      box-shadow: none;
+      border-left: none;
+      padding: 0;
+    }
+
+    .fc .fc-timegrid-slot-label,
+    .fc .fc-timegrid-axis-cushion,
+    .fc .fc-col-header-cell-cushion {
+      color: var(--muted);
+      font-weight: 600;
+    }
+
+    .fc .fc-event {
+      border: none;
+      background: transparent;
+      padding: 2px 0;
+    }
+
+    .event-card {
+      display: grid;
+      gap: 4px;
+      padding: 6px 8px;
+      border-radius: 12px;
+      background: #fff;
+      border-left: 4px solid var(--event-color, var(--accent));
+      box-shadow: 0 8px 16px rgba(23, 22, 18, 0.08);
+      font-size: 12px;
+    }
+
+    .event-time {
+      font-weight: 600;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .event-text {
+      color: var(--ink);
+    }
+
+    @media (max-width: 980px) {
+      header.topbar {
+        grid-template-columns: 1fr;
+      }
+
+      .controls {
+        grid-template-columns: 1fr;
+      }
+
+      .grid {
+        grid-template-columns: 1fr;
+      }
+
+      #calendar {
+        min-height: 520px;
+      }
+
+      .side-panel {
+        max-height: none;
+      }
+
+      .topbar-actions {
+        justify-content: flex-start;
+      }
+
+      .activity-heatmap {
+        --heat-cell-size: 10px;
+      }
+
+      .calendar-title {
+        font-size: 16px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">
+        <div class="logo">X</div>
+        <div>
+          <h1>X Scheduler</h1>
+          <p>JST only | one post per run | no auto retry</p>
+        </div>
+      </div>
+      <div class="topbar-actions">
+        <div class="chip" id="conn-chip" data-state="offline">GAS: offline</div>
+        <button class="button" id="new-btn">New Post</button>
+        <button class="button secondary" id="refresh-btn">Refresh</button>
+      </div>
+    </header>
+
+    <section class="controls">
+      <section>
+        <div class="control-row">
+          <label for="view-select">View</label>
+          <div class="control-inline">
+            <select id="view-select">
+              <option value="dayGridMonth">Month</option>
+              <option value="timeGridWeek">Week</option>
+            </select>
+            <button class="button ghost small" id="today-btn">Today</button>
+          </div>
+        </div>
+        <div class="control-row">
+          <label>Calendar</label>
+          <div class="calendar-nav">
+            <button class="button ghost small" id="prev-btn" aria-label="Previous period">Prev</button>
+            <div class="calendar-title" id="calendar-title" aria-live="polite">Month</div>
+            <button class="button ghost small" id="next-btn" aria-label="Next period">Next</button>
+          </div>
+        </div>
+        <div class="control-row legend-row legend" id="legend"></div>
+      </section>
+
+      <section>
+        <div class="control-row">
+          <label for="status-filter">Status</label>
+          <select id="status-filter">
+            <option value="all">All</option>
+            <option value="queued">Queued</option>
+            <option value="posting">Posting</option>
+            <option value="posted">Posted</option>
+            <option value="failed">Failed</option>
+            <option value="canceled">Canceled</option>
+          </select>
+        </div>
+        <div class="control-row">
+          <label for="search-input">Search</label>
+          <input type="search" id="search-input" placeholder="Search text">
+        </div>
+      </section>
+    </section>
+
+    <main class="grid">
+      <section class="card">
+        <div id="calendar"></div>
+      </section>
+
+      <aside class="side-panel">
+        <section class="card">
+          <div class="panel-header">
+            <h2>Posted activity</h2>
+            <div class="activity-total" id="activity-total">0 posted</div>
+          </div>
+          <div class="help" id="activity-range">Jan 1, 2026 - Dec 31, 2026</div>
+          <div class="activity-heatmap" id="activity-heatmap">
+            <div class="activity-weekdays" id="activity-weekdays" aria-hidden="true"></div>
+            <div class="activity-scroll">
+              <div class="activity-months" id="activity-months" aria-hidden="true"></div>
+              <div class="activity-grid" id="activity-grid" role="grid" aria-label="Posted activity"></div>
+            </div>
+          </div>
+          <div class="activity-legend">
+            <span>Less</span>
+            <span class="activity-swatch" data-level="0"></span>
+            <span class="activity-swatch" data-level="1"></span>
+            <span class="activity-swatch" data-level="2"></span>
+            <span class="activity-swatch" data-level="3"></span>
+            <span class="activity-swatch" data-level="4"></span>
+            <span>More</span>
+          </div>
+        </section>
+
+        <section class="card">
+          <div class="panel-header">
+            <h2 id="panel-title">Day overview</h2>
+            <button class="button secondary small" id="clear-day-btn">Clear</button>
+          </div>
+          <div class="help" id="panel-subtitle">Pick a day to see details.</div>
+          <ul class="post-list" id="post-list"></ul>
+          <div class="empty" id="empty-day">No posts for this day.</div>
+        </section>
+        <section class="card">
+          <div class="panel-header">
+            <h2>Rules</h2>
+          </div>
+          <div class="help">
+            Lock + queued -> posting -> posted/failed. One post per trigger.
+          </div>
+          <div class="help">Failed notifications are throttled for 30 minutes.</div>
+        </section>
+      </aside>
+    </main>
+  </div>
+
+  <div class="modal" id="editor-modal" aria-hidden="true">
+    <div class="modal-card">
+      <h3 id="modal-title">New Post</h3>
+      <div class="modal-row">
+        <label for="post-datetime">Scheduled time (JST)</label>
+        <input type="datetime-local" id="post-datetime">
+        <div class="help" id="date-help">Past time is not allowed.</div>
+      </div>
+      <div class="modal-row">
+        <label for="post-text">Text</label>
+        <textarea id="post-text" placeholder="Write your post..."></textarea>
+        <div class="help" id="text-count">0 chars</div>
+      </div>
+      <div class="modal-row">
+        <div class="help" id="status-line"></div>
+        <div class="help" id="error-line"></div>
+      </div>
+      <div class="modal-actions" id="modal-actions"></div>
+    </div>
+  </div>
+
+  <div class="toast" id="toast" role="status" aria-live="polite"></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/fullcalendar@6.1.11/index.global.min.js"></script>
+  <?!= include('app'); ?>
+</body>
+</html>

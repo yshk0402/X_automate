@@ -1,0 +1,966 @@
+const CONFIG = {
+  timezone: 'Asia/Tokyo',
+  maxTextLength: null,
+  listSnippetLength: 80,
+  eventSnippetLength: 32,
+  timeStepMinutes: 5,
+  activityStart: { year: 2026, month: 0, day: 1 },
+  activityEnd: { year: 2027, month: 0, day: 1 },
+};
+
+const STATUS = {
+  queued: { label: 'Queued', color: '#1b9aaa' },
+  posting: { label: 'Posting', color: '#f2c14e' },
+  posted: { label: 'Posted', color: '#2f8f4e' },
+  failed: { label: 'Failed', color: '#c94f4f' },
+  canceled: { label: 'Canceled', color: '#8a8a8a' },
+};
+
+const state = {
+  postsById: new Map(),
+  selectedDateKey: null,
+  activeRange: null,
+  activityRange: null,
+  activityGridRange: null,
+  activityPosts: [],
+  view: 'dayGridMonth',
+  filters: { status: 'all', query: '' },
+  editingId: null,
+  connection: { online: false },
+};
+
+const isGas = typeof google !== 'undefined' && google.script && google.script.run;
+
+const elements = {};
+let calendar = null;
+
+document.addEventListener('DOMContentLoaded', () => {
+  bindElements();
+  initControls();
+  initCalendar();
+  renderLegend();
+  updateConnectionChip(isGas, false);
+  calendar.render();
+  syncCalendarTitle();
+});
+
+function bindElements() {
+  elements.calendar = document.getElementById('calendar');
+  elements.viewSelect = document.getElementById('view-select');
+  elements.calendarTitle = document.getElementById('calendar-title');
+  elements.prevBtn = document.getElementById('prev-btn');
+  elements.nextBtn = document.getElementById('next-btn');
+  elements.statusFilter = document.getElementById('status-filter');
+  elements.searchInput = document.getElementById('search-input');
+  elements.newBtn = document.getElementById('new-btn');
+  elements.refreshBtn = document.getElementById('refresh-btn');
+  elements.todayBtn = document.getElementById('today-btn');
+  elements.clearDayBtn = document.getElementById('clear-day-btn');
+  elements.legend = document.getElementById('legend');
+  elements.postList = document.getElementById('post-list');
+  elements.emptyDay = document.getElementById('empty-day');
+  elements.panelTitle = document.getElementById('panel-title');
+  elements.panelSubtitle = document.getElementById('panel-subtitle');
+  elements.activityHeatmap = document.getElementById('activity-heatmap');
+  elements.activityGrid = document.getElementById('activity-grid');
+  elements.activityTotal = document.getElementById('activity-total');
+  elements.activityRange = document.getElementById('activity-range');
+  elements.activityMonths = document.getElementById('activity-months');
+  elements.activityWeekdays = document.getElementById('activity-weekdays');
+  elements.modal = document.getElementById('editor-modal');
+  elements.modalTitle = document.getElementById('modal-title');
+  elements.datetimeInput = document.getElementById('post-datetime');
+  elements.textInput = document.getElementById('post-text');
+  elements.textCount = document.getElementById('text-count');
+  elements.statusLine = document.getElementById('status-line');
+  elements.errorLine = document.getElementById('error-line');
+  elements.modalActions = document.getElementById('modal-actions');
+  elements.toast = document.getElementById('toast');
+  elements.connChip = document.getElementById('conn-chip');
+}
+
+function initControls() {
+  elements.viewSelect.addEventListener('change', (event) => {
+    state.view = event.target.value;
+    calendar.changeView(state.view);
+  });
+
+  elements.prevBtn.addEventListener('click', () => {
+    if (!calendar) return;
+    calendar.prev();
+  });
+
+  elements.nextBtn.addEventListener('click', () => {
+    if (!calendar) return;
+    calendar.next();
+  });
+
+  elements.statusFilter.addEventListener('change', (event) => {
+    state.filters.status = event.target.value;
+    renderCalendarEvents();
+    renderDayPanel();
+  });
+
+  elements.searchInput.addEventListener('input', (event) => {
+    state.filters.query = event.target.value.trim().toLowerCase();
+    renderCalendarEvents();
+    renderDayPanel();
+  });
+
+  elements.newBtn.addEventListener('click', () => {
+    const now = roundToStep(new Date(), CONFIG.timeStepMinutes);
+    openModal({ mode: 'create', scheduledAt: now, text: '' });
+  });
+
+  elements.refreshBtn.addEventListener('click', () => {
+    refreshRange();
+  });
+
+  elements.todayBtn.addEventListener('click', () => {
+    calendar.today();
+    selectDate(new Date());
+  });
+
+  elements.clearDayBtn.addEventListener('click', () => {
+    state.selectedDateKey = null;
+    renderDayPanel();
+  });
+
+  elements.textInput.addEventListener('input', () => {
+    updateTextCount();
+  });
+
+  elements.postList.addEventListener('click', (event) => {
+    const button = event.target.closest('[data-action]');
+    if (!button) return;
+    const item = event.target.closest('.post-item');
+    if (!item) return;
+    const postId = item.dataset.id;
+    handleListAction(button.dataset.action, postId);
+  });
+
+  elements.modal.addEventListener('click', (event) => {
+    if (event.target === elements.modal) {
+      closeModal();
+    }
+  });
+
+  window.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && elements.modal.classList.contains('active')) {
+      closeModal();
+    }
+  });
+}
+
+function initCalendar() {
+  calendar = new FullCalendar.Calendar(elements.calendar, {
+    initialView: state.view,
+    timeZone: 'local',
+    headerToolbar: false,
+    nowIndicator: true,
+    selectable: true,
+    editable: true,
+    eventDurationEditable: false,
+    dayMaxEventRows: 3,
+    slotMinTime: '06:00:00',
+    slotMaxTime: '24:00:00',
+    slotLabelFormat: { hour: '2-digit', minute: '2-digit', hour12: false },
+    select: (info) => {
+      const start = info.start;
+      openModal({ mode: 'create', scheduledAt: start, text: '' });
+      calendar.unselect();
+    },
+    dateClick: (info) => {
+      selectDate(info.date);
+    },
+    eventClick: (info) => {
+      const post = state.postsById.get(info.event.id);
+      if (post) {
+        openModal({ mode: 'view', post });
+      }
+    },
+    eventDrop: (info) => {
+      handleEventDrop(info);
+    },
+    datesSet: () => {
+      syncCalendarTitle();
+      refreshRange();
+    },
+    eventContent: (info) => {
+      const post = state.postsById.get(info.event.id);
+      if (!post) return;
+      const time = formatTime(toDate(post.scheduled_at));
+      const snippet = truncate(post.text, CONFIG.eventSnippetLength);
+      return {
+        html: `<div class="event-card"><div class="event-time">${escapeHtml(time)}</div><div class="event-text">${escapeHtml(snippet)}</div></div>`,
+      };
+    },
+    eventDidMount: (info) => {
+      const status = info.event.extendedProps.status;
+      const color = STATUS[status] ? STATUS[status].color : '#999999';
+      info.el.style.setProperty('--event-color', color);
+    },
+  });
+}
+
+function syncCalendarTitle() {
+  if (!elements.calendarTitle || !calendar) return;
+  const title = calendar.view ? calendar.view.title : '';
+  elements.calendarTitle.textContent = title || 'Calendar';
+}
+
+function renderLegend() {
+  elements.legend.innerHTML = '';
+  Object.entries(STATUS).forEach(([key, value]) => {
+    const item = document.createElement('div');
+    item.className = 'legend-item';
+    item.innerHTML = `
+      <span style="background:${value.color}"></span>
+      <strong>${value.label}</strong>
+      <span data-count="${key}">0</span>
+    `;
+    elements.legend.appendChild(item);
+  });
+}
+
+function updateLegendCounts() {
+  const counts = countByStatus();
+  Object.keys(STATUS).forEach((status) => {
+    const el = elements.legend.querySelector(`[data-count="${status}"]`);
+    if (el) el.textContent = counts[status] || 0;
+  });
+}
+
+async function refreshRange() {
+  if (!calendar) return;
+  const start = calendar.view.activeStart;
+  const end = calendar.view.activeEnd;
+  state.activeRange = { start, end };
+  setLoading(true);
+  try {
+    const posts = await gasCall('listPosts', toJstIso(start), toJstIso(end));
+    setPosts(posts || []);
+    updateConnectionChip(isGas, true);
+  } catch (error) {
+    updateConnectionChip(isGas, false);
+    showToast(error.message || 'Failed to load posts', 'error');
+  }
+  await refreshActivity();
+  setLoading(false);
+}
+
+function setPosts(posts) {
+  state.postsById.clear();
+  posts.forEach((post) => {
+    const normalized = normalizePost(post);
+    state.postsById.set(normalized.id, normalized);
+  });
+  renderCalendarEvents();
+  renderDayPanel();
+  updateLegendCounts();
+}
+
+async function refreshActivity() {
+  if (!elements.activityGrid) return;
+  const range = getActivityRange();
+  state.activityRange = range;
+  state.activityGridRange = getActivityGridRange(range);
+  try {
+    const posts = await gasCall('listPosts', toJstIso(range.start), toJstIso(range.end));
+    setActivityPosts(posts || []);
+  } catch (error) {
+    setActivityPosts([]);
+  }
+}
+
+function setActivityPosts(posts) {
+  state.activityPosts = posts.map((post) => normalizePost(post));
+  renderActivityGrid();
+}
+
+function renderCalendarEvents() {
+  if (!calendar) return;
+  calendar.removeAllEvents();
+  const posts = getVisiblePosts();
+  posts.forEach((post) => {
+    const start = toDate(post.scheduled_at);
+    if (!start) return;
+    calendar.addEvent({
+      id: post.id,
+      start,
+      allDay: false,
+      title: post.text,
+      extendedProps: { status: post.status },
+    });
+  });
+}
+
+function selectDate(date) {
+  state.selectedDateKey = formatDateKey(date);
+  renderDayPanel();
+}
+
+function renderDayPanel() {
+  const key = state.selectedDateKey;
+  if (!key) {
+    elements.panelTitle.textContent = 'Day overview';
+    elements.panelSubtitle.textContent = 'Pick a day to see details.';
+    elements.postList.innerHTML = '';
+    elements.emptyDay.style.display = 'block';
+    return;
+  }
+
+  const posts = getVisiblePosts().filter((post) => formatDateKey(toDate(post.scheduled_at)) === key);
+  elements.panelTitle.textContent = formatDateLabel(parseDateKey(key));
+  elements.panelSubtitle.textContent = `${posts.length} posts`;
+  elements.postList.innerHTML = '';
+
+  if (!posts.length) {
+    elements.emptyDay.style.display = 'block';
+    return;
+  }
+
+  elements.emptyDay.style.display = 'none';
+  posts.sort((a, b) => toDate(a.scheduled_at) - toDate(b.scheduled_at));
+  posts.forEach((post, index) => {
+    const item = document.createElement('li');
+    item.className = 'post-item';
+    item.style.setProperty('--i', index);
+    item.dataset.id = post.id;
+    const status = STATUS[post.status] ? STATUS[post.status].label : post.status;
+    const time = formatTime(toDate(post.scheduled_at));
+    item.innerHTML = `
+      <div class="post-meta">
+        <span class="status-dot" style="background:${STATUS[post.status]?.color || '#999'}"></span>
+        <span>${escapeHtml(time)}</span>
+        <span>${escapeHtml(status)}</span>
+      </div>
+      <div class="post-text">${escapeHtml(truncate(post.text, CONFIG.listSnippetLength))}</div>
+      <div class="post-actions">
+        <button class="button small secondary" data-action="open">Open</button>
+        ${post.status === 'queued' ? '<button class="button small" data-action="edit">Edit</button>' : ''}
+        ${post.status === 'queued' ? '<button class="button small secondary" data-action="cancel">Cancel</button>' : ''}
+        ${post.status === 'failed' ? '<button class="button small" data-action="retry">Retry</button>' : ''}
+        ${post.status === 'posting' ? '<button class="button small secondary" data-action="clear">Clear Posting</button>' : ''}
+      </div>
+    `;
+    elements.postList.appendChild(item);
+  });
+}
+
+function renderActivityGrid() {
+  if (!elements.activityGrid || !elements.activityHeatmap) return;
+  const range = state.activityRange || getActivityRange();
+  const gridRange = state.activityGridRange || getActivityGridRange(range);
+  const counts = buildPostedCounts(state.activityPosts || []);
+  const total = Array.from(counts.values()).reduce((sum, count) => sum + count, 0);
+  const totalDays = diffInDays(gridRange.start, gridRange.end);
+  const today = new Date();
+
+  elements.activityHeatmap.style.setProperty('--activity-weeks', gridRange.weeks);
+
+  if (elements.activityTotal) {
+    elements.activityTotal.textContent = `${total} posted`;
+  }
+
+  if (elements.activityRange) {
+    elements.activityRange.textContent = formatActivityRangeLabel(range);
+  }
+
+  renderActivityMonths(range, gridRange);
+  renderActivityWeekdays();
+
+  elements.activityGrid.innerHTML = '';
+  for (let i = 0; i < totalDays; i += 1) {
+    const date = addDays(gridRange.start, i);
+    const key = formatDateKey(date);
+    const isOutside = date < range.start || date >= range.end;
+    const count = isOutside ? 0 : counts.get(key) || 0;
+    const cell = document.createElement('div');
+    cell.className = 'activity-cell';
+    cell.dataset.level = String(getActivityLevel(count));
+    cell.style.gridColumn = String(getWeekIndex(gridRange.start, date) + 1);
+    cell.style.gridRow = String(date.getDay() + 1);
+
+    if (isOutside) {
+      cell.classList.add('is-outside');
+      cell.setAttribute('aria-hidden', 'true');
+      elements.activityGrid.appendChild(cell);
+      continue;
+    }
+
+    if (isSameDay(date, today)) {
+      cell.classList.add('is-today');
+    }
+
+    cell.setAttribute('role', 'gridcell');
+    cell.setAttribute('aria-label', `${formatDateLabel(date)}: ${count} posted`);
+    cell.title = `${formatDateLabel(date)}: ${count} posted`;
+    elements.activityGrid.appendChild(cell);
+  }
+}
+
+function handleListAction(action, postId) {
+  const post = state.postsById.get(postId);
+  if (!post) return;
+
+  if (action === 'open') {
+    openModal({ mode: 'view', post });
+    return;
+  }
+
+  if (action === 'edit') {
+    openModal({ mode: 'edit', post });
+    return;
+  }
+
+  if (action === 'cancel') {
+    if (!confirm('Cancel this post?')) return;
+    runAction(() => gasCall('cancelPost', postId), 'Canceled');
+    return;
+  }
+
+  if (action === 'retry') {
+    runAction(() => gasCall('retryPost', postId), 'Queued for retry');
+    return;
+  }
+
+  if (action === 'clear') {
+    const reason = prompt('Reason for clearing posting status?', 'Manual clear');
+    if (!reason) return;
+    runAction(() => gasCall('clearPosting', postId, reason), 'Posting cleared');
+  }
+}
+
+function openModal({ mode, post, scheduledAt, text }) {
+  elements.modal.classList.add('active');
+  elements.modal.setAttribute('aria-hidden', 'false');
+
+  const isCreate = mode === 'create';
+  const isEdit = mode === 'edit';
+  const isView = mode === 'view';
+
+  state.editingId = post ? post.id : null;
+  const status = post ? post.status : 'queued';
+
+  elements.modalTitle.textContent = isCreate ? 'New Post' : isEdit ? 'Edit Post' : 'Post Details';
+  const dateValue = isCreate ? scheduledAt : post ? toDate(post.scheduled_at) : new Date();
+  const textValue = isCreate ? text : post ? post.text : '';
+
+  elements.datetimeInput.value = toLocalInputValue(dateValue);
+  elements.textInput.value = textValue;
+  updateTextCount();
+
+  elements.statusLine.textContent = post ? `Status: ${STATUS[status]?.label || status}` : '';
+  elements.errorLine.textContent = post && post.error ? `Error: ${post.error}` : '';
+
+  const editable = isCreate || (isEdit && status === 'queued');
+  elements.datetimeInput.disabled = !editable;
+  elements.textInput.disabled = !editable;
+
+  elements.modalActions.innerHTML = '';
+
+  if (isCreate) {
+    appendModalButton('Create', 'button', () => savePost(true));
+  }
+
+  if (isEdit && status === 'queued') {
+    appendModalButton('Save', 'button', () => savePost(false));
+    appendModalButton('Cancel Post', 'secondary', () => runAction(() => gasCall('cancelPost', post.id), 'Canceled'));
+  }
+
+  if (isView) {
+    if (status === 'failed') {
+      appendModalButton('Retry', 'button', () => runAction(() => gasCall('retryPost', post.id), 'Queued for retry'));
+    }
+    if (status === 'posting') {
+      appendModalButton('Clear Posting', 'secondary', () => {
+        const reason = prompt('Reason for clearing posting status?', 'Manual clear');
+        if (!reason) return;
+        runAction(() => gasCall('clearPosting', post.id, reason), 'Posting cleared');
+      });
+    }
+  }
+
+  appendModalButton('Close', 'secondary', () => closeModal());
+}
+
+function appendModalButton(label, type, handler) {
+  const btn = document.createElement('button');
+  btn.className = type === 'button' ? 'button' : 'button secondary';
+  btn.textContent = label;
+  btn.addEventListener('click', handler);
+  elements.modalActions.appendChild(btn);
+}
+
+function closeModal() {
+  elements.modal.classList.remove('active');
+  elements.modal.setAttribute('aria-hidden', 'true');
+  elements.modalActions.innerHTML = '';
+}
+
+function savePost(isCreate) {
+  const datetimeValue = elements.datetimeInput.value;
+  const textValue = elements.textInput.value.trim();
+
+  if (!datetimeValue) {
+    showToast('Pick a date and time', 'error');
+    return;
+  }
+
+  if (!textValue) {
+    showToast('Text is required', 'error');
+    return;
+  }
+
+  const limit = CONFIG.maxTextLength;
+  if (Number.isFinite(limit) && textValue.length > limit) {
+    showToast('Text is too long', 'error');
+    return;
+  }
+
+  const date = parseLocalInput(datetimeValue);
+  if (!date) {
+    showToast('Invalid date', 'error');
+    return;
+  }
+
+  if (isPast(date)) {
+    showToast('Past time is not allowed', 'error');
+    return;
+  }
+
+  const payload = {
+    scheduled_at: toJstIso(date),
+    text: textValue,
+  };
+
+  if (isCreate) {
+    runAction(() => gasCall('createPost', payload), 'Created');
+  } else {
+    runAction(() => gasCall('updatePost', state.editingId, payload), 'Saved');
+  }
+}
+
+function handleEventDrop(info) {
+  const post = state.postsById.get(info.event.id);
+  if (!post) return;
+  if (post.status !== 'queued') {
+    info.revert();
+    showToast('Only queued posts can be moved', 'error');
+    return;
+  }
+  if (isPast(info.event.start)) {
+    info.revert();
+    showToast('Past time is not allowed', 'error');
+    return;
+  }
+
+  runAction(() => gasCall('movePost', post.id, toJstIso(info.event.start)), 'Moved', info.revert);
+}
+
+async function runAction(actionFn, successMessage, onErrorRevert) {
+  setLoading(true);
+  try {
+    await actionFn();
+    closeModal();
+    await refreshRange();
+    showToast(successMessage || 'Updated');
+  } catch (error) {
+    if (onErrorRevert) onErrorRevert();
+    showToast(error.message || 'Action failed', 'error');
+  } finally {
+    setLoading(false);
+  }
+}
+
+function updateTextCount() {
+  const length = elements.textInput.value.length;
+  const limit = CONFIG.maxTextLength;
+  elements.textCount.textContent = Number.isFinite(limit) ? `${length} / ${limit}` : `${length} chars`;
+}
+
+function setLoading(isLoading) {
+  elements.refreshBtn.disabled = isLoading;
+  elements.newBtn.disabled = isLoading;
+  elements.refreshBtn.textContent = isLoading ? 'Loading...' : 'Refresh';
+}
+
+function updateConnectionChip(canUseGas, isOnline) {
+  if (!canUseGas) {
+    elements.connChip.textContent = 'GAS: offline';
+    elements.connChip.dataset.state = 'offline';
+    return;
+  }
+  elements.connChip.textContent = isOnline ? 'GAS: online' : 'GAS: offline';
+  elements.connChip.dataset.state = isOnline ? 'online' : 'offline';
+}
+
+function getVisiblePosts() {
+  const statusFilter = state.filters.status;
+  const query = state.filters.query;
+  return Array.from(state.postsById.values()).filter((post) => {
+    if (statusFilter !== 'all' && post.status !== statusFilter) return false;
+    if (query && !post.text.toLowerCase().includes(query)) return false;
+    return true;
+  });
+}
+
+function countByStatus() {
+  const counts = {};
+  state.postsById.forEach((post) => {
+    counts[post.status] = (counts[post.status] || 0) + 1;
+  });
+  return counts;
+}
+
+function buildPostedCounts(posts) {
+  const counts = new Map();
+  posts.forEach((post) => {
+    if (post.status !== 'posted') return;
+    const date = getActivityDate(post);
+    if (!date) return;
+    const key = formatDateKey(date);
+    counts.set(key, (counts.get(key) || 0) + 1);
+  });
+  return counts;
+}
+
+function getActivityDate(post) {
+  if (!post) return null;
+  return toDate(post.posted_at || post.scheduled_at);
+}
+
+function getActivityRange() {
+  const start = new Date(CONFIG.activityStart.year, CONFIG.activityStart.month, CONFIG.activityStart.day);
+  const end = new Date(CONFIG.activityEnd.year, CONFIG.activityEnd.month, CONFIG.activityEnd.day);
+  return { start, end };
+}
+
+function getActivityGridRange(range) {
+  const gridStart = startOfWeek(range.start);
+  const gridEnd = addDays(startOfWeek(range.end), 7);
+  const weeks = Math.ceil(diffInDays(gridStart, gridEnd) / 7);
+  return { start: gridStart, end: gridEnd, weeks };
+}
+
+function renderActivityMonths(range, gridRange) {
+  if (!elements.activityMonths) return;
+  elements.activityMonths.innerHTML = '';
+  const months = [];
+  const year = range.start.getFullYear();
+
+  for (let month = 0; month < 12; month += 1) {
+    const date = new Date(year, month, 1);
+    if (date < range.start || date >= range.end) continue;
+    const column = getWeekIndex(gridRange.start, date) + 1;
+    months.push({ month, column });
+  }
+
+  months.forEach((item, index) => {
+    const nextColumn = months[index + 1]?.column || gridRange.weeks + 1;
+    const span = Math.max(1, nextColumn - item.column);
+    const label = document.createElement('div');
+    label.className = 'activity-month';
+    label.textContent = formatMonthName(item.month);
+    label.style.gridColumn = `${item.column} / span ${span}`;
+    elements.activityMonths.appendChild(label);
+  });
+}
+
+function renderActivityWeekdays() {
+  if (!elements.activityWeekdays) return;
+  elements.activityWeekdays.innerHTML = '';
+  const labels = [
+    { label: 'M', row: 2 },
+    { label: 'W', row: 4 },
+    { label: 'F', row: 6 },
+  ];
+
+  labels.forEach((item) => {
+    const label = document.createElement('div');
+    label.className = 'activity-weekday';
+    label.textContent = item.label;
+    label.style.gridRow = String(item.row);
+    elements.activityWeekdays.appendChild(label);
+  });
+}
+
+function formatActivityRangeLabel(range) {
+  const endDate = addDays(range.end, -1);
+  return `${formatRangeDate(range.start)} - ${formatRangeDate(endDate)}`;
+}
+
+function formatRangeDate(date) {
+  const month = formatMonthName(date.getMonth());
+  return `${month} ${date.getDate()}, ${date.getFullYear()}`;
+}
+
+function formatMonthName(monthIndex) {
+  const names = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  return names[monthIndex] || '';
+}
+
+function startOfWeek(date) {
+  const start = new Date(date);
+  const day = start.getDay();
+  start.setDate(start.getDate() - day);
+  start.setHours(0, 0, 0, 0);
+  return start;
+}
+
+function addDays(date, days) {
+  const next = new Date(date);
+  next.setDate(next.getDate() + days);
+  return next;
+}
+
+function diffInDays(start, end) {
+  const startDate = new Date(start.getFullYear(), start.getMonth(), start.getDate());
+  const endDate = new Date(end.getFullYear(), end.getMonth(), end.getDate());
+  return Math.round((endDate - startDate) / (24 * 60 * 60 * 1000));
+}
+
+function getWeekIndex(gridStart, date) {
+  return Math.floor(diffInDays(gridStart, date) / 7);
+}
+
+function isSameDay(a, b) {
+  return formatDateKey(a) === formatDateKey(b);
+}
+
+function getActivityLevel(count) {
+  if (!count) return 0;
+  if (count >= 4) return 4;
+  return count;
+}
+
+function normalizePost(post) {
+  return {
+    id: post.id,
+    scheduled_at: post.scheduled_at,
+    posted_at: post.posted_at || '',
+    text: post.text || '',
+    status: post.status || 'queued',
+    error: post.error || '',
+  };
+}
+
+function toDate(value) {
+  if (!value) return null;
+  if (value instanceof Date) return value;
+  return new Date(value);
+}
+
+function toLocalInputValue(date) {
+  const local = new Date(date);
+  const pad = (num) => String(num).padStart(2, '0');
+  return `${local.getFullYear()}-${pad(local.getMonth() + 1)}-${pad(local.getDate())}T${pad(local.getHours())}:${pad(local.getMinutes())}`;
+}
+
+function parseLocalInput(value) {
+  const [datePart, timePart] = value.split('T');
+  if (!datePart || !timePart) return null;
+  const [year, month, day] = datePart.split('-').map(Number);
+  const [hour, minute] = timePart.split(':').map(Number);
+  return new Date(year, month - 1, day, hour, minute);
+}
+
+function toJstIso(date) {
+  const pad = (num) => String(num).padStart(2, '0');
+  const local = new Date(date);
+  const year = local.getFullYear();
+  const month = pad(local.getMonth() + 1);
+  const day = pad(local.getDate());
+  const hour = pad(local.getHours());
+  const minute = pad(local.getMinutes());
+  return `${year}-${month}-${day}T${hour}:${minute}:00+09:00`;
+}
+
+function formatTime(date) {
+  if (!date) return '';
+  const pad = (num) => String(num).padStart(2, '0');
+  return `${pad(date.getHours())}:${pad(date.getMinutes())}`;
+}
+
+function formatDateKey(date) {
+  if (!date) return '';
+  const pad = (num) => String(num).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+function formatDateLabel(date) {
+  const options = { weekday: 'short', month: 'short', day: 'numeric', timeZone: CONFIG.timezone };
+  return date.toLocaleDateString(undefined, options);
+}
+
+function parseDateKey(key) {
+  if (!key) return new Date();
+  const [year, month, day] = key.split('-').map(Number);
+  return new Date(year, month - 1, day);
+}
+
+function truncate(text, limit) {
+  if (!text) return '';
+  if (text.length <= limit) return text;
+  return `${text.slice(0, limit - 1)}...`;
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function isPast(date) {
+  if (!date) return false;
+  return date.getTime() < Date.now() - 60 * 1000;
+}
+
+function roundToStep(date, stepMinutes) {
+  const rounded = new Date(date);
+  const minutes = rounded.getMinutes();
+  const step = stepMinutes;
+  const remainder = minutes % step;
+  if (remainder !== 0) {
+    rounded.setMinutes(minutes + (step - remainder));
+  }
+  rounded.setSeconds(0, 0);
+  return rounded;
+}
+
+function showToast(message, tone) {
+  elements.toast.textContent = message;
+  if (tone) {
+    elements.toast.dataset.tone = tone;
+  } else {
+    delete elements.toast.dataset.tone;
+  }
+  elements.toast.classList.add('show');
+  setTimeout(() => {
+    elements.toast.classList.remove('show');
+  }, 2400);
+}
+
+function gasCall(method, ...args) {
+  if (!isGas) {
+    return mockCall(method, ...args);
+  }
+
+  return new Promise((resolve, reject) => {
+    try {
+      google.script.run
+        .withSuccessHandler((result) => resolve(result))
+        .withFailureHandler((error) => reject(normalizeError(error)))[method](...args);
+    } catch (error) {
+      reject(normalizeError(error));
+    }
+  });
+}
+
+function normalizeError(error) {
+  if (!error) return new Error('Unknown error');
+  if (error instanceof Error) return error;
+  if (typeof error === 'string') return new Error(error);
+  if (error.message) return new Error(error.message);
+  return new Error('Request failed');
+}
+
+const mockStore = { initialized: false, posts: [] };
+
+function mockCall(method, ...args) {
+  if (!mockStore.initialized) initMock();
+  const handler = mockHandlers[method];
+  if (!handler) {
+    return Promise.reject(new Error(`Mock missing handler: ${method}`));
+  }
+  return new Promise((resolve) => {
+    setTimeout(() => resolve(handler(...args)), 200);
+  });
+}
+
+function initMock() {
+  mockStore.initialized = true;
+  const now = new Date();
+  mockStore.posts = [
+    createMockPost('mock-1', addMinutes(now, 30), 'Queued post sample', 'queued'),
+    createMockPost('mock-2', addMinutes(now, 180), 'Another queued post', 'queued'),
+    createMockPost('mock-3', addMinutes(now, -120), 'Failed post example', 'failed', 'Rate limit'),
+    createMockPost('mock-4', addMinutes(now, -300), 'Posted earlier', 'posted'),
+    createMockPost('mock-5', addMinutes(now, 240), 'Canceled item', 'canceled'),
+    createMockPost('mock-6', addMinutes(now, 20), 'Posting lock example', 'posting'),
+  ];
+}
+
+function createMockPost(id, date, text, status, error) {
+  return {
+    id,
+    scheduled_at: toJstIso(date),
+    text,
+    status,
+    error: error || '',
+  };
+}
+
+function addMinutes(date, minutes) {
+  return new Date(date.getTime() + minutes * 60 * 1000);
+}
+
+const mockHandlers = {
+  listPosts(startIso, endIso) {
+    const start = toDate(startIso);
+    const end = toDate(endIso);
+    return mockStore.posts.filter((post) => {
+      const date = toDate(post.scheduled_at);
+      return date >= start && date < end;
+    });
+  },
+  createPost(payload) {
+    const id = `mock-${Math.random().toString(36).slice(2, 8)}`;
+    const post = {
+      id,
+      scheduled_at: payload.scheduled_at,
+      text: payload.text,
+      status: 'queued',
+      error: '',
+    };
+    mockStore.posts.push(post);
+    return post;
+  },
+  updatePost(id, payload) {
+    const post = mockStore.posts.find((item) => item.id === id);
+    if (!post) return null;
+    post.scheduled_at = payload.scheduled_at;
+    post.text = payload.text;
+    return post;
+  },
+  movePost(id, newScheduledAt) {
+    const post = mockStore.posts.find((item) => item.id === id);
+    if (!post) return null;
+    post.scheduled_at = newScheduledAt;
+    return post;
+  },
+  cancelPost(id) {
+    const post = mockStore.posts.find((item) => item.id === id);
+    if (!post) return null;
+    post.status = 'canceled';
+    return post;
+  },
+  retryPost(id) {
+    const post = mockStore.posts.find((item) => item.id === id);
+    if (!post) return null;
+    post.status = 'queued';
+    post.error = '';
+    return post;
+  },
+  clearPosting(id, reason) {
+    const post = mockStore.posts.find((item) => item.id === id);
+    if (!post) return null;
+    post.status = 'failed';
+    post.error = `Cleared: ${reason}`;
+    return post;
+  },
+};
